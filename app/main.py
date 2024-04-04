@@ -1,4 +1,4 @@
-Uncomment this to pass the first stage
+# Uncomment this to pass the first stage
 import socket
 
 
