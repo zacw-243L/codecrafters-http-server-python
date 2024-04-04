@@ -7,27 +7,26 @@ def parse_input(input: bytes) -> List[str]:
     return input.split("\r\n")
 
 
-def extract_random_string(path: str) -> str:
-    return path.split("/")[-1]
-
-
 def handle_request(input: bytes) -> bytes:
+    # we expect requests like this:
+    # GET /index.html HTTP/1.1
+    # Host: localhost:4221
+    # User-Agent: curl/7.64.1
     input = parse_input(input)
     method, path, version = input[0].split(" ")
-    random_string = extract_random_string(path)
-    content_type = "text/plain"
-    content_length = len(random_string.encode())
-    body = random_string.encode()
-    headers = f"Content-Type: {content_type}\r\nContent-Length: {content_length}\r\n"
-    status_line = "HTTP/1.1 200 OK\r\n"
-    response = f"{status_line}{headers}\r\n{body}"
-    return response
+    output = ""
+    if path == "/":
+        output = b"HTTP/1.1 200 OK\r\n\r\n"
+    else:
+        output = b"HTTP/1.1 404 Not Found\r\n\r\n"
+    return output
 
 
 def main():
+    # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
-    connection, client = server_socket.accept()
+    connection, client = server_socket.accept()  # wait for
 
     with connection:
         input = connection.recv(1024)
