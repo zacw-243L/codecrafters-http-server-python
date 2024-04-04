@@ -1,7 +1,4 @@
 import socket
-import json
-import random
-import string
 import threading
 
 HTTP_SUCCESS_RESPONSE = "HTTP/1.1 200 OK\r\n"
