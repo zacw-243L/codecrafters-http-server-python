@@ -1,60 +1,77 @@
 import socket
-from threading import Thread
+import sys
+import threading
+from pathlib import Path
+
+CR = "\r\n"
+CR_END = CR + CR
 
 
-def get_user_agent(request):
-    lines = request.split("\r\n")
-    for line in lines:
-        if "User-Agent" in line:
-            return line.split("User-Agent: ")[1]
-    return "User-Agent not found"
+def respond_OK(content=None, content_type="text/plain"):
+    response = ["HTTP/1.1 200 OK"]
+
+    if content:
+        response += [f"Content-Type: {content_type}", f"Content-Length: {len(content)}", "", f"{content}", ]
+        return CR.join(response).encode()
+    return (response[0] + CR_END).encode()
 
 
-def get_host(request):
-    lines = request.split("\r\n")
-    for line in lines:
-        if "Host" in line:
-            return line.split("Host: ")[1]
-    return "Host not found"
+def respond_NotFound():
+    return f"HTTP/1.1 404 Not Found{CR}Content-Length: 0{CR_END}".encode()
 
 
-def get_req(request):
-    lines = request.split("\r\n")
-    method, path, protocol = lines[0].split(" ")
-    return method, path, protocol
+def handle(client_socket: socket.socket, dir: str):
+    request = client_socket.recv(4096)
+
+    lines = request.decode().split(CR)
+    method, path, version = lines[0].split(" ")
+
+    if path == "/":
+        client_socket.send(respond_OK())
+
+    elif path.startswith("/echo/"):
+        rand_str = path[6:]
+        client_socket.send(respond_OK(rand_str))
+
+    elif path == "/user-agent":
+        user_agent = ""
+        for header in lines[1:]:
+            if header.startswith("User-Agent"):
+                user_agent = header[12:]
+        client_socket.send(respond_OK(user_agent))
+
+    elif path.startswith("/files"):
+        filename = path[7:]
+        path = Path(f"{dir}/{filename}")
+        if dir and path.is_file():
+            file = path.read_text()
+            client_socket.send(respond_OK(file, "application/octet-stream"))
+        else:
+            client_socket.send(respond_NotFound())
+
+    else:
+        client_socket.send(respond_NotFound())
+
+    client_socket.close()
 
 
-def handle_connection(connection, address):
-    with connection:
-        print("Connected by", address)
-        # infinite loop to keep the connection open and receive data continuously
+def main(dir=None):
+    with socket.socket() as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("localhost", 4221))
+        server_socket.listen()
+
         while True:
-            request = connection.recv(1024)
-            req_str = request.decode("utf-8")
-            method, path, protocol = get_req(req_str)
-            host = get_host(req_str)
-            agent = get_user_agent(req_str)
-            response = "HTTP/1.1 404 Not Found\r\n\r\n".encode("utf-8")
-
-            if path == "/":
-                response = "HTTP/1.1 200 OK\r\n\r\n".encode("utf-8")
-            elif "/user-agent" in path:
-                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(agent)}\r\n\r\n{agent}".encode("utf-8")
-            elif "/echo/" in path:
-                data = path.split("/echo/")[1]
-                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(data)}\r\n\r\n{data}".encode("utf-8")
-            connection.sendall(response)
-
-
-def main():
-    print("Logs from your program will appear here!")
-    server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
-    while True:
-        connection, address = server_socket.accept()
-        thread = Thread(target=handle_connection, args=(connection, address))
-        thread.start()
+            client_socket, addr = server_socket.accept()
+            threading.Thread(target=handle, args=(client_socket, dir, ), daemon=True, ).start()
 
 
 if __name__ == "__main__":
-    main()
-    
+    args = sys.argv
+
+    dir = None
+    for i in range(len(args)):
+        if args[i] == "--directory":
+            dir = args[i+1]
+
+    main(dir)
