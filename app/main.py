@@ -35,18 +35,14 @@ def handle_connection(connection, address):
             host = get_host(req_str)
             agent = get_user_agent(req_str)
             response = "HTTP/1.1 404 Not Found\r\n\r\n".encode("utf-8")
+
             if path == "/":
                 response = "HTTP/1.1 200 OK\r\n\r\n".encode("utf-8")
             elif "/user-agent" in path:
-                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(agent)}\r\n\r\n{agent}".encode(
-                    "utf-8"
-                )
+                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(agent)}\r\n\r\n{agent}".encode("utf-8")
             elif "/echo/" in path:
                 data = path.split("/echo/")[1]
-                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(data)}\r\n\r\n{data}".encode(
-                    "utf-8"
-                )
-
+                response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(data)}\r\n\r\n{data}".encode("utf-8")
             connection.sendall(response)
 
 
