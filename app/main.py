@@ -20,6 +20,10 @@ def respond_NotFound():
     return f"HTTP/1.1 404 Not Found{CR}Content-Length: 0{CR_END}".encode()
 
 
+def respond_NoContent():
+    return f"HTTP/1.1 201 No Content{CR_END}".encode()
+
+
 def handle(client_socket: socket.socket, dir: str):
     request = client_socket.recv(4096)
 
@@ -43,11 +47,19 @@ def handle(client_socket: socket.socket, dir: str):
     elif path.startswith("/files"):
         filename = path[7:]
         path = Path(f"{dir}/{filename}")
-        if dir and path.is_file():
-            file = path.read_text()
-            client_socket.send(respond_OK(file, "application/octet-stream"))
-        else:
-            client_socket.send(respond_NotFound())
+
+        if method == "GET":
+            if dir and path.is_file():
+                file = path.read_text()
+                client_socket.send(respond_OK(file, "application/octet-stream"))
+            else:
+                client_socket.send(respond_NotFound())
+        elif method == "POST":
+            sep = lines.index("")
+            content = CR.join(lines[sep + 1:])
+            with open(path, "w") as file:
+                file.write(content)
+            client_socket.send(respond_NoContent())
 
     else:
         client_socket.send(respond_NotFound())
@@ -63,7 +75,7 @@ def main(dir=None):
 
         while True:
             client_socket, addr = server_socket.accept()
-            threading.Thread(target=handle, args=(client_socket, dir, ), daemon=True, ).start()
+            threading.Thread(target=handle, args=(client_socket, dir,), daemon=True, ).start()
 
 
 if __name__ == "__main__":
@@ -72,6 +84,6 @@ if __name__ == "__main__":
     dir = None
     for i in range(len(args)):
         if args[i] == "--directory":
-            dir = args[i+1]
+            dir = args[i + 1]
 
     main(dir)
