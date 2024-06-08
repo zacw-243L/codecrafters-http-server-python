@@ -1,66 +1,65 @@
-import os
+from sys import argv
 import socket
-
-# Will need this to access command line arguments.
-import sys
-from threading import Thread
-
-"""
-run ./your_server.sh in one terminal session, and nc -vz 127.0.0.1 4221 in another.
-"""
-
-accepted_encoding_types = ["gzip", ]
+import threading
 
 
-def request_handler(conn):
-    if len(sys.argv) == 3:
-        directory_location = sys.argv[-1]
-    with conn:
-        while True:
-            data = conn.recv(1024)
-            if not data:
-                break
-            request_data = data.decode().split("\r\n")
-            response = b"HTTP/1.1 404 Not Found\r\n\r\n"
-            request_type, request_path = request_data[0].split(" ", 1)
-            encoding_type = request_data[2].split(": ")[-1]
-            request_path = request_path.split(" ")[0]
+def handle_request(conn, addr):
+    data = conn.recv(1024).decode("utf-8")
+    request = data.split("\r\n")
+    method = request[0].split(" ")[0]
+    path = request[0].split(" ")[1]
+    body = request[-1]
+    user_agent = ""
+    accept_encoding = ""
+    for line in request:
+        if line.startswith("User-Agent:"):
+            user_agent = line[len("User-Agent: ") :]
+        if line.startswith("Accept-Encoding:"):
+            accept_encoding = line[len("Accept-Encoding: ") :]
 
-            if request_type == "POST" and "/files/" in request_path:
-                file_name = request_path.split("/")[-1]
-                file_save_location = f"{directory_location}{file_name}"
-                request_file_contents = request_data[-1]
-                with open(file_save_location, "w") as new_file:
-                    new_file.write(request_file_contents)
-                response = b"HTTP/1.1 201 Created\r\n\r\n"
-
-            if request_type == "GET":
-                if request_path == "/":
-                    response = b"HTTP/1.1 200 OK\r\n\r\n"
-
-                elif "echo" in request_path:
-                    echo_val = request_path.split("/")[-1]
-                    if encoding_type in accepted_encoding_types:
-                        response = f"HTTP/1.1 200 OK\r\nContent-Encoding:{encoding_type}\r\nContent-Type: text/plain\r\nContent-Length: {len(echo_val)}\r\n\r\n{echo_val}".encode()
-                    else:
-                        response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(echo_val)}\r\n\r\n{echo_val}".encode()
-                elif "user-agent" in request_path:
-                    user_agent_header_data = request_data[2].split(" ")[1]
-                    response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(user_agent_header_data)}\r\n\r\n{user_agent_header_data}".encode()
-                elif "/files/" in request_path:
-                    file_name = request_path.split("/")[-1]
-                    if os.path.exists(f"{directory_location}{file_name}"):
-                        with open(f"{directory_location}{file_name}") as f:
-                            file_contents = f.read()
-                        response = f"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len(file_contents)}\r\n\r\n{file_contents}".encode()
-            conn.sendall(response)
+    encoding = ""
+    if "gzip" in accept_encoding:
+        encoding = "Content-Encoding: gzip\r\n"
+    if path == "/":
+        conn.send(b"HTTP/1.1 200 OK\r\n\r\n")
+    elif path == "/user-agent":
+        response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(user_agent)}\r\n\r\n{user_agent}\r\n"
+        conn.send(response.encode())
+    elif "/files" in path:
+        if method == "POST":
+            directory = argv[2]
+            filename = path[7:]
+            try:
+                with open(f"/{directory}/{filename}", "w") as f:
+                    f.write(f"{body}")
+                response = f"HTTP/1.1 201 Created\r\n\r\n"
+            except Exception as e:
+                response = f"HTTP/1.1 404 Not Found\r\n\r\n"
+            conn.send(response.encode())
+        elif method == "GET":
+            f_name = path.split("/")[-1]
+            try:
+                with open(argv[2] + f_name) as f:
+                    content = f.read()
+                    cont_length = len(content)
+                    response = f"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {str(cont_length)}\r\n\r\n{content}"
+            except FileNotFoundError:
+                response = "HTTP/1.1 404 Not Found\r\n\r\n"
+            conn.send(response.encode())
+    elif path.startswith("/echo"):
+        random_path = path[6:]
+        response = f"HTTP/1.1 200 OK\r\n{encoding}Content-Type: text/plain\r\nContent-Length: {len(random_path)}\r\n\r\n{random_path}\r\n"
+        conn.send(response.encode())
+    else:
+        conn.send(b"HTTP/1.1 404 Not Found\r\n\r\n")
+    conn.close()
 
 
 def main():
     server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
     while True:
-        conn, _ = server_socket.accept()
-        Thread(target=request_handler, args=(conn,)).start()
+        conn, addr = server_socket.accept()  # wait for client
+        threading.Thread(target=handle_request, args=(conn, addr)).start()
 
 
 if __name__ == "__main__":
