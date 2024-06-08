@@ -1,89 +1,67 @@
+import os
 import socket
+
+# Will need this to access command line arguments.
 import sys
-import threading
-from pathlib import Path
+from threading import Thread
 
-CR = "\r\n"
-CR_END = CR + CR
+"""
+run ./your_server.sh in one terminal session, and nc -vz 127.0.0.1 4221 in another.
+"""
 
-
-def respond_OK(content=None, content_type="text/plain"):
-    response = ["HTTP/1.1 200 OK"]
-
-    if content:
-        response += [f"Content-Type: {content_type}", f"Content-Length: {len(content)}", "", f"{content}", ]
-        return CR.join(response).encode()
-    return (response[0] + CR_END).encode()
+accepted_encoding_types = ["gzip", ]
 
 
-def respond_NotFound():
-    return f"HTTP/1.1 404 Not Found{CR}Content-Length: 0{CR_END}".encode()
-
-
-def respond_NoContent():
-    return f"HTTP/1.1 201 No Content{CR_END}".encode()
-
-
-def handle(client_socket: socket.socket, dir: str):
-    request = client_socket.recv(4096)
-
-    lines = request.decode().split(CR)
-    method, path, version = lines[0].split(" ")
-
-    if path == "/":
-        client_socket.send(respond_OK())
-
-    elif path.startswith("/echo/"):
-        rand_str = path[6:]
-        client_socket.send(respond_OK(rand_str))
-
-    elif path == "/user-agent":
-        user_agent = ""
-        for header in lines[1:]:
-            if header.startswith("User-Agent"):
-                user_agent = header[12:]
-        client_socket.send(respond_OK(user_agent))
-
-    elif path.startswith("/files"):
-        filename = path[7:]
-        path = Path(f"{dir}/{filename}")
-
-        if method == "GET":
-            if dir and path.is_file():
-                file = path.read_text()
-                client_socket.send(respond_OK(file, "application/octet-stream"))
-            else:
-                client_socket.send(respond_NotFound())
-        elif method == "POST":
-            sep = lines.index("")
-            content = CR.join(lines[sep + 1:])
-            with open(path, "w") as file:
-                file.write(content)
-            client_socket.send(respond_NoContent())
-
-    else:
-        client_socket.send(respond_NotFound())
-
-    client_socket.close()
-
-
-def main(dir=None):
-    with socket.socket() as server_socket:
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(("localhost", 4221))
-        server_socket.listen()
-
+def request_handler(conn):
+    if len(sys.argv) == 3:
+        directory_location = sys.argv[-1]
+    with conn:
         while True:
-            client_socket, addr = server_socket.accept()
-            threading.Thread(target=handle, args=(client_socket, dir,), daemon=True, ).start()
+            data = conn.recv(1024)
+            if not data:
+                break
+            request_data = data.decode().split("\r\n")
+            response = b"HTTP/1.1 404 Not Found\r\n\r\n"
+            request_type, request_path = request_data[0].split(" ", 1)
+            encoding_type = request_data[2].split(": ")[-1]
+            request_path = request_path.split(" ")[0]
+
+            if request_type == "POST" and "/files/" in request_path:
+                file_name = request_path.split("/")[-1]
+                file_save_location = f"{directory_location}{file_name}"
+                request_file_contents = request_data[-1]
+                with open(file_save_location, "w") as new_file:
+                    new_file.write(request_file_contents)
+                response = b"HTTP/1.1 201 Created\r\n\r\n"
+
+            if request_type == "GET":
+                if request_path == "/":
+                    response = b"HTTP/1.1 200 OK\r\n\r\n"
+
+                elif "echo" in request_path:
+                    echo_val = request_path.split("/")[-1]
+                    if encoding_type in accepted_encoding_types:
+                        response = f"HTTP/1.1 200 OK\r\nContent-Encoding:{encoding_type}\r\nContent-Type: text/plain\r\nContent-Length: {len(echo_val)}\r\n\r\n{echo_val}".encode()
+                    else:
+                        response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(echo_val)}\r\n\r\n{echo_val}".encode()
+                elif "user-agent" in request_path:
+                    user_agent_header_data = request_data[2].split(" ")[1]
+                    response = f"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len(user_agent_header_data)}\r\n\r\n{user_agent_header_data}".encode()
+                elif "/files/" in request_path:
+                    file_name = request_path.split("/")[-1]
+                    if os.path.exists(f"{directory_location}{file_name}"):
+                        with open(f"{directory_location}{file_name}") as f:
+                            file_contents = f.read()
+                        response = f"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len(file_contents)}\r\n\r\n{file_contents}".encode()
+            conn.sendall(response)
+
+
+def main():
+    server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
+    while True:
+        conn, _ = server_socket.accept()
+        Thread(target=request_handler, args=(conn,)).start()
 
 
 if __name__ == "__main__":
-    args = sys.argv
-
-    dir = None
-    for i in range(len(args)):
-        if args[i] == "--directory":
-            dir = args[i + 1]
-
-    main(dir)
+    main()
