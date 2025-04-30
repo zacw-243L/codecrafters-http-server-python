@@ -1,211 +1,156 @@
+import os.path
+import socket  # noqa: F401
+import threading
+from dataclasses import dataclass
+import re
 import argparse
-import asyncio
-import dataclasses
+from typing import Optional
 import gzip
-import os
-import typing
+HTTP___NOT_FOUND_ = "HTTP/1.1 404 Not Found"
+
+ENCODING = 'utf-8'
 
 
-@dataclasses.dataclass(frozen=True)
-class HTTPRequestLine:
-    method: str
-    target: str
-    version: str
-
-    @classmethod
-    async def parse(cls, reader: asyncio.StreamReader) -> typing.Self:
-        data = (await reader.readuntil(b"\r\n"))[:-2].decode()
-        method, target, version = data.split(" ")
-        return cls(method, target, version)
-
-
-@dataclasses.dataclass(frozen=True)
-class HTTPRequest:
-    request_line: HTTPRequestLine
+@dataclass
+class HttpResponse:
+    status_line: str
     headers: dict[str, str]
-    body: bytes
+    body: Optional[bytes]
 
-    @classmethod
-    async def parse(cls, reader: asyncio.StreamReader) -> typing.Self:
-        request_line = await HTTPRequestLine.parse(reader)
+@dataclass
+class ServerArguments:
+    file_dir: str
 
-        headers = {}
-        while True:
-            data = (await reader.readuntil(b"\r\n"))[:-2].decode()
-            if not data:
-                break
-            i = data.index(":")
-            name, value = data[:i], data[i+1:].strip()
-            headers[name] = value
-
-        body = b""
-        if (value := headers.get("Content-Length")) is not None:
-            body = await reader.readexactly(int(value))
-
-        return cls(request_line, headers, body)
+@dataclass
+class HttpRequest:
+    method: str
+    path: str
+    protocol: str
+    host: str
+    host: str
+    user_agent: str
+    accept: str
+    body: str
+    accept_encoding: Optional[str]
+    close: bool
 
 
-@dataclasses.dataclass(frozen=True)
-class HTTPStatusLine:
-    status_code: int
-    reason_phrase: str = ""
+def handle_file(request_data: HttpRequest, server_args: ServerArguments) -> HttpResponse:
+    file_name = request_data.path.replace("/files/", server_args.file_dir)
 
-    def encode(self) -> bytes:
-        return f"HTTP/1.1 {self.status_code} {self.reason_phrase}\r\n".encode()
-
-    @classmethod
-    def ok(cls) -> typing.Self:
-        return cls(200, "OK")
-
-    @classmethod
-    def created(cls) -> typing.Self:
-        return cls(201, "Created")
-
-    @classmethod
-    def not_found(cls) -> typing.Self:
-        return cls(404, "Not Found")
+    if request_data.method == 'GET':
+        if not os.path.isfile(file_name):
+            return HttpResponse(HTTP___NOT_FOUND_, {}, None)
+        size = os.path.getsize(file_name)
+        with open(file_name, 'rb') as file:
+            return HttpResponse("HTTP/1.1 200 OK", {"Content-Type": "application/octet-stream", "Content-Length": size}, file.read())
+    if request_data.method == 'POST':
+        with open(file_name, 'wb') as file:
+            file.write(request_data.body.encode(ENCODING))
+        return HttpResponse("HTTP/1.1 201 Created", {}, None)
 
 
-class Stringifiable(typing.Protocol):
-    def __str__(self) -> str:
-        ...
 
 
-@dataclasses.dataclass(frozen=True)
-class HTTPResponse:
-    status_line: HTTPStatusLine
-    headers: dict[str, Stringifiable] = dataclasses.field(default_factory=dict)
-    body: bytes = b""
+def handle_echo(request_data: HttpRequest) -> HttpResponse:
+    arg = re.sub("^/echo/", "", request_data.path)
+    headers = {
+        "Content-Type": "text/plain",
+        "Content-Length": len(arg)
+    }
+    return HttpResponse("HTTP/1.1 200 OK", headers, arg.encode(ENCODING))
 
-    def encode(self) -> bytes:
-        return b"".join([
-            self.status_line.encode(),
-            b"".join(
-                f"{name}: {value}\r\n".encode() for name, value in self.headers.items()
-            ),
-            b"\r\n",
-            self.body,
-        ])
+def handle_user_agent(request_dat: HttpRequest):
+    return HttpResponse("HTTP/1.1 200 OK", {"Content-Type": "text/plain", "Content-Length": len(request_dat.user_agent)}, request_dat.user_agent.encode(ENCODING))
 
-
-class HTTPClientConnection:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self._reader = reader
-        self._writer = writer
-
-    async def recv_request(self) -> HTTPRequest:
-        return await HTTPRequest.parse(self._reader)
-
-    async def send_response(self, response: HTTPResponse) -> None:
-        self._writer.write(response.encode())
-        await self._writer.drain()
-
-    async def __aenter__(self) -> None:
-        pass
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        self._writer.close()
-        await self._writer.wait_closed()
+def format_http_response(response: HttpResponse) -> bytes:
+    res = response.status_line.encode(ENCODING) + "\r\n".encode(ENCODING)
+    for key, val in response.headers.items():
+        res = res + f"{key}: {val}\r\n".encode(ENCODING)
+    res = res + "\r\n".encode(ENCODING)
+    if response.body:
+        res = res + response.body
+    return res
 
 
-class HTTPServer:
-    def __init__(self, directory: str) -> None:
-        self._directory = directory
+def handle_compression(request: HttpRequest, response: HttpResponse):
+    if not request.accept_encoding:
+        return
+    if 'gzip' in request.accept_encoding.split(", "):
+        temp_data = gzip.compress(response.body)
+        response.headers['Content-Length'] = str(len(temp_data))
+        response.body = temp_data
+        response.headers['Content-Encoding'] = 'gzip'
 
-    async def start(self) -> None:
-        server = await asyncio.start_server(self._client_connected_cb, host="localhost", port=4221, reuse_port=True)
-        async with server:
-            await server.serve_forever()
 
-    async def _client_connected_cb(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        connection = HTTPClientConnection(reader, writer)
-        async with connection:
-            while True:
-                request = await connection.recv_request()
-                response = self._handle_request(request)
-                await connection.send_response(response)
-
-    def _handle_request(self, request: HTTPRequest) -> HTTPResponse:
-        if request.request_line.target.startswith("/echo/"):
-            return self._handle_echo_endpoint(request)
-        if request.request_line.target.startswith("/files/"):
-            return self._handle_files_endpoint(request)
-        if request.request_line.target == "/user-agent":
-            return self._handle_user_agent_endpoint(request)
-
-        if request.request_line.target == "/":
-            return HTTPResponse(status_line=HTTPStatusLine.ok())
-        return HTTPResponse(status_line=HTTPStatusLine.not_found())
-
-    def _handle_echo_endpoint(self, request: HTTPRequest) -> HTTPResponse:
-        compression_schemes = request.headers.get("Accept-Encoding")
-        if compression_schemes is not None:
-            compression_schemes = compression_schemes.split(", ")
+def parse_http_request(data: bytes):
+    parts = data.decode(ENCODING).split(' ')
+    method = parts[0]
+    path = parts[1]
+    protocol = parts[2].split("\r\n")[0]
+    more_parts = data.decode(ENCODING).split("\r\n")[1:]
+    more_parts_dict = {}
+    body = None
+    for thingy in more_parts:
+        components = thingy.split(": ")
+        if ": " in thingy:
+            more_parts_dict[components[0]] = components[1]
         else:
-            compression_schemes = []
+            body = components[0]
+    close = True if more_parts_dict.get("Connection", "aaaaaa") == 'close' else False
+    return HttpRequest(method, path, protocol, more_parts_dict.get('HOST', None), more_parts_dict.get('User-Agent', None), more_parts_dict.get('Accept', None), body, more_parts_dict.get("Accept-Encoding", None), close)
 
-        body = request.request_line.target[6:].encode()
-
-        headers = {
-            "Content-Type": "text/plain",
-        }
-        if "gzip" in compression_schemes:
-            headers["Content-Encoding"] = "gzip"
-            body = gzip.compress(body)
-        headers["Content-Length"] = len(body)
-
-        return HTTPResponse(
-            status_line=HTTPStatusLine.ok(),
-            headers=headers,
-            body=body,
-        )
-
-    def _handle_files_endpoint(self, request: HTTPRequest) -> HTTPResponse:
-        filename = request.request_line.target[7:]
-        path = os.path.join(self._directory, filename)
-
-        if request.request_line.method == "POST":
-            with open(path, mode="wb") as f:
-                f.write(request.body)
-            return HTTPResponse(status_line=HTTPStatusLine.created())
-
-        try:
-            with open(path, mode="rb") as f:
-                body = f.read()
-        except FileNotFoundError:
-            return HTTPResponse(status_line=HTTPStatusLine.not_found())
-
-        return HTTPResponse(
-            status_line=HTTPStatusLine.ok(),
-            headers={
-                "Content-Type": "application/octet-stream",
-                "Content-Length": len(body),
-            },
-            body=body,
-        )
-
-    def _handle_user_agent_endpoint(self, request: HTTPRequest) -> HTTPResponse:
-        body = request.headers["User-Agent"].encode()
-        return HTTPResponse(
-            status_line=HTTPStatusLine.ok(),
-            headers={
-                "Content-Type": "text/plain",
-                "Content-Length": len(body),
-            },
-            body=body,
-        )
+def handle_request_content(request_data: HttpRequest, server_args: ServerArguments ) -> HttpResponse:
+    if request_data.path == '/':
+        return HttpResponse("HTTP/1.1 200 OK", {}, None)
+    if request_data.path.startswith("/echo/"):
+        return handle_echo(request_data)
+    if request_data.path.startswith('/files/'):
+        return handle_file(request_data, server_args)
+    if request_data.path == "/user-agent":
+        return handle_user_agent(request_data)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CodeCrafters - Build your own HTTP server")
-    parser.add_argument("--directory", type=str, default="")
-    return parser.parse_args()
+    return HttpResponse(HTTP___NOT_FOUND_, {}, None)
+
+def handle_request(conn: socket.socket, server_args: ServerArguments):
+    close = False
+    while not close:
+        data = conn.recv(1024)
+        request_data = parse_http_request(data)
+        temp = handle_request_content(request_data, server_args)
+        handle_compression(request_data, temp)
+        close = request_data.close
+        if close:
+            temp.headers["Connection"] = "close"
+
+        conn.sendall(format_http_response(temp))
+        if close:
+            conn.close()
 
 
-def main() -> None:
-    args = parse_args()
-    server = HTTPServer(directory=args.directory)
-    asyncio.run(server.start())
+def main():
+    # You can use print statements as follows for debugging, they'll be visible when running tests.
+    print("Logs from your program will appear here!")
+    parser = argparse.ArgumentParser(
+        prog='ProgramName',
+        description='What the program does',
+        epilog='Text at the bottom of help')
+    parser.add_argument('-d', '--directory')  # option that takes a value
+    args = parser.parse_args()
+    server_args = ServerArguments(args.directory)
+
+    # Uncomment this to pass the first stage
+    #
+    server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
+
+    while True:
+        conn, addr = server_socket.accept()
+        threading.Thread(target=handle_request, args=(conn, server_args)).start()
+
+
+
+
 
 
 if __name__ == "__main__":
